@@ -716,7 +716,7 @@ function ingresarAlCurso(id) {
 
     const dashTitle = document.getElementById("dash-title");
     const dashRes = document.getElementById("dash-res");
-    
+
     if (dashTitle) dashTitle.innerText = course.title;
     if (dashRes) dashRes.innerText = course.res;
 
@@ -726,8 +726,14 @@ function ingresarAlCurso(id) {
         localStorage.setItem("my_courses", JSON.stringify(myCourses));
     }
 
-    renderModulesList(course, 0);
-    updateVideoPlayer(id, 0); 
+    // Abre en la primera lección que falte por completar
+    const next = findNextPending(course, -1, -1) || { m: 0, l: 0 };
+    currentModIndex = next.m;
+    currentLessonIndex = next.l;
+    openModules = new Set([next.m]);
+
+    renderModulesList(course);
+    updateVideoPlayer(id, next.m, next.l);
     changeTab("desc");
     updateProgressUI(course);
     switchView("dashboard-view");
@@ -736,32 +742,61 @@ function ingresarAlCurso(id) {
 // ======================================================
 // REPRODUCTOR DE VIDEO Y PESTAÑAS (PDF)
 // ======================================================
-function updateVideoPlayer(courseId, modIndex) {
+function updateVideoPlayer(courseId, modIndex, lessonIndex = 0) {
     const videoContainer = document.getElementById("video-player-container");
     const course = courses.find(c => c.id === courseId);
-    
+
     if (!videoContainer || !course) return;
 
-    if (courseId === 1 && modIndex === 0) {
+    const lesson = getLessons(course, modIndex)[lessonIndex];
+    if (!lesson) return;
+
+    const modName = course.modules[modIndex];
+    const hasRealVideo = courseId === 1 && modIndex === 0 && lesson.type === "video";
+    const hasRealPdf = courseId === 1 && modIndex === 0 && lesson.type === "lectura";
+
+    if (hasRealVideo) {
+        // Al terminar el video, la lección se marca sola
         videoContainer.innerHTML = `
-            <video class="local-video-element" controls>
+            <video class="local-video-element" controls
+                   onended="completeLesson(${courseId}, ${modIndex}, ${lessonIndex})">
                 <source src="diseño web.mp4" type="video/mp4">
                 Tu navegador no soporta la reproducción de videos.
             </video>
         `;
-    } else {
+    } else if (hasRealPdf) {
         videoContainer.innerHTML = `
             <div style="text-align: center; padding: 1rem;">
-                <span style="font-size: 2.5rem; display: block; margin-bottom: 0.5rem; color: #555;">▶</span>
+                <span style="font-size: 2.5rem; display: block; margin-bottom: 0.5rem;">📄</span>
                 <span id="current-lesson-title" style="color: #f8fafc; font-size: 1.1rem; font-weight: 600;">
-                    Estudiando: Módulo ${modIndex + 1} - ${course.modules[modIndex]}
+                    ${lesson.title}
                 </span>
-                <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 10px;">
-                    El video de esta lección no está disponible actualmente.
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin: 10px 0;">
+                    Abre la guía; al descargarla la lección se marca como completada.
                 </p>
+                <a href="introduccion-al-diseno-web.pdf" target="_blank" class="btn-descargar-pdf"
+                   onclick="completeLesson(${courseId}, ${modIndex}, ${lessonIndex})">
+                    📄 Abrir guía en PDF
+                </a>
+            </div>
+        `;
+    } else {
+        const icon = lesson.type === "video" ? "▶" : (lesson.type === "lectura" ? "📖" : "🛠️");
+        const nota = lesson.type === "video"
+            ? "El video de esta lección no está disponible actualmente."
+            : "Cuando termines, márcala como completada.";
+        videoContainer.innerHTML = `
+            <div style="text-align: center; padding: 1rem;">
+                <span style="font-size: 2.5rem; display: block; margin-bottom: 0.5rem; color: #555;">${icon}</span>
+                <span id="current-lesson-title" style="color: #f8fafc; font-size: 1.1rem; font-weight: 600;">
+                    ${modName} · ${lesson.title}
+                </span>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 10px;">${nota}</p>
             </div>
         `;
     }
+
+    renderLessonActions(course);
 }
 
 function changeTab(tabName) {
@@ -808,75 +843,214 @@ function changeTab(tabName) {
 // ======================================================
 // FUNCIONES DE MÓDULOS Y PROGRESO
 // ======================================================
-function renderModulesList(course, activeIndex) {
+function renderModulesList(course) {
     const moduleList = document.getElementById("module-list");
     if (!moduleList) return;
     moduleList.innerHTML = "";
 
-    let completedModules = JSON.parse(localStorage.getItem(`completed_course_${course.id}`) || "[]");
+    const done = getDoneLessons(course.id);
 
-    course.modules.forEach((mod, index) => {
-        const isCompleted = completedModules.includes(index);
-        const isActive = index === activeIndex;
+    course.modules.forEach((modName, m) => {
+        const lessons = getLessons(course, m);
+        const doneCount = lessons.filter((_, l) => done.includes(lessonKey(m, l))).length;
+        const pct = Math.round((doneCount / lessons.length) * 100);
+        const isComplete = doneCount === lessons.length;
+        const isOpen = openModules.has(m);
+        const isCurrentMod = m === currentModIndex;
+
+        const lessonsHtml = lessons.map((lesson, l) => {
+            const isDone = done.includes(lessonKey(m, l));
+            const isCurrent = isCurrentMod && l === currentLessonIndex;
+            return `
+                <li class="lesson-item ${isDone ? "done" : ""} ${isCurrent ? "current" : ""}">
+                    <button type="button" class="lesson-btn" onclick="selectLesson(${course.id}, ${m}, ${l})">
+                        <span class="lesson-dot">${isDone ? "✓" : ""}</span>
+                        <span class="lesson-title">${lesson.title}</span>
+                        <span class="lesson-kind">${lesson.icon}</span>
+                    </button>
+                </li>`;
+        }).join("");
+
         const li = document.createElement("li");
-
-        li.className = `module-item ${isActive ? "active-module" : ""} ${isCompleted ? "completed-module" : ""}`;
+        li.className = `mod-block ${isOpen ? "open" : ""} ${isComplete ? "is-complete" : ""} ${isCurrentMod ? "is-current" : ""}`;
         li.innerHTML = `
-            <div class="module-left" onclick="selectModule(${course.id}, ${index})">
-                <div class="module-number">${index + 1}</div>
-                <div style="font-size: 0.85rem; font-weight: 500;">${mod}</div>
-            </div>
-            <button class="btn-check" type="button" onclick="event.stopPropagation(); toggleModuleComplete(${course.id}, ${index});">
-                ${isCompleted ? "✓ Visto" : "Marcar visto"}
+            <button type="button" class="mod-header" aria-expanded="${isOpen}" onclick="toggleModuleOpen(${m})">
+                <span class="mod-status">${isComplete ? "✓" : m + 1}</span>
+                <span class="mod-info">
+                    <span class="mod-name">${modName}</span>
+                    <span class="mod-meta">${doneCount} de ${lessons.length} lecciones</span>
+                </span>
+                <span class="mod-pct">${pct}%</span>
+                <span class="mod-chevron" aria-hidden="true">▾</span>
             </button>
+            <div class="mod-bar"><div class="mod-bar-fill" style="width: ${pct}%"></div></div>
+            <ul class="lesson-list">${lessonsHtml}</ul>
         `;
         moduleList.appendChild(li);
     });
+}
 
-    const lessonTitle = document.getElementById("current-lesson-title");
-    if (lessonTitle && course.modules[activeIndex]) {
-        lessonTitle.innerText = `Estudiando: Módulo ${activeIndex + 1} - ${course.modules[activeIndex]}`;
+// ---- Lecciones: datos y estado ----
+let currentModIndex = 0;
+let currentLessonIndex = 0;
+let openModules = new Set([0]);
+
+// Cada módulo tiene las mismas 3 lecciones: video, lectura y actividad
+function getLessons(course, modIndex) {
+    return [
+        { type: "video",     icon: "▶",  title: "Video de la clase" },
+        { type: "lectura",   icon: "📖", title: "Lectura de apoyo" },
+        { type: "actividad", icon: "🛠️", title: "Actividad práctica" }
+    ];
+}
+
+function lessonKey(m, l) { return `${m}.${l}`; }
+
+function getDoneLessons(courseId) {
+    const key = `lessons_course_${courseId}`;
+    const saved = localStorage.getItem(key);
+    if (saved !== null) return JSON.parse(saved);
+
+    // Migración: si había módulos marcados con el sistema anterior, se marcan todas sus lecciones
+    const old = JSON.parse(localStorage.getItem(`completed_course_${courseId}`) || "[]");
+    const course = courses.find(c => c.id === courseId);
+    const migrated = [];
+    if (course) {
+        old.forEach(m => getLessons(course, m).forEach((_, l) => migrated.push(lessonKey(m, l))));
     }
+    return migrated;
+}
+
+function saveDoneLessons(courseId, list) {
+    localStorage.setItem(`lessons_course_${courseId}`, JSON.stringify(list));
+}
+
+// Busca la siguiente lección sin completar después de (m, l); con m = -1 busca desde el inicio
+function findNextPending(course, m, l) {
+    const done = getDoneLessons(course.id);
+    const all = [];
+    course.modules.forEach((_, i) => getLessons(course, i).forEach((_, j) => all.push({ m: i, l: j })));
+    const start = all.findIndex(x => x.m === m && x.l === l) + 1;
+    for (let k = start; k < all.length; k++) {
+        if (!done.includes(lessonKey(all[k].m, all[k].l))) return all[k];
+    }
+    return null;
+}
+
+// Barra de acciones debajo del video
+function renderLessonActions(course) {
+    const box = document.getElementById("lesson-actions");
+    if (!box) return;
+
+    const lessons = getLessons(course, currentModIndex);
+    const lesson = lessons[currentLessonIndex];
+    const isDone = getDoneLessons(course.id).includes(lessonKey(currentModIndex, currentLessonIndex));
+    const isLast = currentModIndex === course.modules.length - 1 && currentLessonIndex === lessons.length - 1;
+
+    box.innerHTML = `
+        <div class="lesson-actions-text">
+            <strong>${course.modules[currentModIndex]}</strong>
+            <span>${lesson.title}</span>
+        </div>
+        <div class="lesson-actions-buttons">
+            <button type="button" class="btn-lesson ${isDone ? "is-done" : "primary"}"
+                    onclick="toggleLessonComplete(${course.id}, ${currentModIndex}, ${currentLessonIndex})">
+                ${isDone ? "✓ Completada" : "Marcar como completada"}
+            </button>
+            ${isLast ? "" : `<button type="button" class="btn-lesson" onclick="goNextLesson(${course.id})">Siguiente →</button>`}
+        </div>
+    `;
 }
 
 function selectModule(courseId, modIndex) {
     const course = courses.find(c => c.id === courseId);
-    if (course) {
-        renderModulesList(course, modIndex);
-        updateVideoPlayer(courseId, modIndex);
-        changeTab("desc");
+    if (!course) return;
+    const done = getDoneLessons(courseId);
+    const lessons = getLessons(course, modIndex);
+    let l = lessons.findIndex((_, i) => !done.includes(lessonKey(modIndex, i)));
+    if (l === -1) l = 0;
+    selectLesson(courseId, modIndex, l);
+}
+
+function selectLesson(courseId, modIndex, lessonIndex) {
+    const course = courses.find(c => c.id === courseId);
+    if (!course) return;
+    currentModIndex = modIndex;
+    currentLessonIndex = lessonIndex;
+    openModules.add(modIndex);
+    renderModulesList(course);
+    updateVideoPlayer(courseId, modIndex, lessonIndex);
+    changeTab("desc");
+}
+
+function toggleModuleOpen(modIndex) {
+    const course = courses.find(c => c.id === currentCourseId);
+    if (!course) return;
+    if (openModules.has(modIndex)) openModules.delete(modIndex);
+    else openModules.add(modIndex);
+    renderModulesList(course);
+}
+
+function goNextLesson(courseId) {
+    const course = courses.find(c => c.id === courseId);
+    if (!course) return;
+    const lessons = getLessons(course, currentModIndex);
+    if (currentLessonIndex < lessons.length - 1) {
+        selectLesson(courseId, currentModIndex, currentLessonIndex + 1);
+    } else if (currentModIndex < course.modules.length - 1) {
+        selectLesson(courseId, currentModIndex + 1, 0);
     }
 }
 
-function toggleModuleComplete(courseId, modIndex) {
+// Marca una lección como completada (la usan el video al terminar y el enlace al PDF)
+function completeLesson(courseId, modIndex, lessonIndex) {
     const course = courses.find(c => c.id === courseId);
     if (!course) return;
-
-    let completedModules = JSON.parse(localStorage.getItem(`completed_course_${courseId}`) || "[]");
-
-    if (completedModules.includes(modIndex)) {
-        completedModules = completedModules.filter(i => i !== modIndex);
-    } else {
-        completedModules.push(modIndex);
+    const done = getDoneLessons(courseId);
+    const key = lessonKey(modIndex, lessonIndex);
+    if (!done.includes(key)) {
+        done.push(key);
+        saveDoneLessons(courseId, done);
     }
+    refreshProgress(course);
+}
 
-    localStorage.setItem(`completed_course_${courseId}`, JSON.stringify(completedModules));
-    renderModulesList(course, modIndex);
+// Botón "Marcar como completada": alterna el estado
+function toggleLessonComplete(courseId, modIndex, lessonIndex) {
+    const course = courses.find(c => c.id === courseId);
+    if (!course) return;
+    let done = getDoneLessons(courseId);
+    const key = lessonKey(modIndex, lessonIndex);
+    done = done.includes(key) ? done.filter(k => k !== key) : [...done, key];
+    saveDoneLessons(courseId, done);
+    refreshProgress(course);
+}
+
+// Redibuja barra lateral, barra general y acciones sin reiniciar el video
+function refreshProgress(course) {
+    renderModulesList(course);
     updateProgressUI(course);
+    renderLessonActions(course);
 }
 
 function updateProgressUI(course) {
-    let completedModules = JSON.parse(localStorage.getItem(`completed_course_${course.id}`) || "[]");
-    const totalModules = course.modules.length;
-    if (totalModules === 0) return;
+    const done = getDoneLessons(course.id);
+    let total = 0;
+    let completed = 0;
+    course.modules.forEach((_, m) => {
+        const lessons = getLessons(course, m);
+        total += lessons.length;
+        completed += lessons.filter((_, l) => done.includes(lessonKey(m, l))).length;
+    });
+    if (total === 0) return;
 
-    const percentage = Math.round((completedModules.length / totalModules) * 100);
+    const percentage = Math.round((completed / total) * 100);
     const progressBar = document.getElementById("progress-bar-fill");
     if (progressBar) progressBar.style.width = percentage + "%";
 
     const progressText = document.getElementById("progress-text");
     if (progressText) {
-        progressText.innerText = `${percentage}% Completado (${completedModules.length}/${totalModules} módulos)`;
+        progressText.innerText = `${percentage}% Completado (${completed}/${total} lecciones)`;
     }
 }
 
